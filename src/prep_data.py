@@ -117,5 +117,6 @@ if __name__ == '__main__':
             break
         ct_t, label_t, series_uid, center_irc = batch
         print(f"{len(series_uid)} elements in batch")
-        print(ct_t[0])
+        print(ct_t[0].shape)
+        print(label_t.shape)
 
