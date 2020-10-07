@@ -4,11 +4,14 @@ import pandas as pd
 import SimpleITK as sitk
 import numpy as np
 import torch
-from util.util import XyzTuple, xyz2irc
+from torch.utils.data import Dataset, DataLoader
+from util.util import XyzTuple, xyz2irc, enumerateWithEstimate
 
-annotations_file = "../data/annotations.csv"
-candidates_file = "../data/candidates.csv"
-candidates_with_diameters_file = "../data/candidates_with_dia.csv"
+base_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+data_dir = os.path.join(base_dir, "data")
+annotations_file = os.path.join(data_dir, "annotations.csv")
+candidates_file = os.path.join(data_dir, "candidates.csv")
+candidates_with_diameters_file = os.path.join(data_dir, "candidates_with_dia.csv")
 
 
 def add_diameter_to_candidates(override=False):
@@ -36,7 +39,7 @@ def add_diameter_to_candidates(override=False):
 class Ct:
     def __init__(self, series_uid):
         self.series_uid = series_uid
-        mhd_path = glob.glob0(f"data/subset*/{series_uid}")[0]
+        mhd_path = glob.glob(f"{data_dir}/subset*/{series_uid}.mhd")[0]
         ct_mhd = sitk.ReadImage(mhd_path)
         ct_array = np.asarray(sitk.GetArrayFromImage(ct_mhd), np.float32)
 
@@ -44,7 +47,7 @@ class Ct:
 
         self.origin = XyzTuple(*ct_mhd.GetOrigin())
         self.voxel_size = XyzTuple(*ct_mhd.GetSpacing())
-        self.direction = np.array(*ct_mhd.GetDirection()).reshape(3, 3)
+        self.direction = np.array(ct_mhd.GetDirection()).reshape(3, 3)
 
     def get_ct_slice(self, slice_dimensions, center_xyz):
         center_irc = xyz2irc(
@@ -74,7 +77,7 @@ class Ct:
         return ct_slice, center_irc
 
 
-class LunaDataset:
+class LunaDataset(Dataset):
     def __init__(self, is_val_set=False, val_stride=10):
         df = pd.read_csv(candidates_with_diameters_file)
         self.ct_slice_size = [32, 48, 48]
@@ -106,4 +109,13 @@ class LunaDataset:
             center_irc
         )
 
+
+if __name__ == '__main__':
+    train_dl = DataLoader(LunaDataset(), batch_size=16, num_workers=8, pin_memory=True)
+    for idx, batch in enumerateWithEstimate(train_dl, "Training DL"):
+        if idx > 2:
+            break
+        ct_t, label_t, series_uid, center_irc = batch
+        print(f"{len(series_uid)} elements in batch")
+        print(ct_t[0])
 
