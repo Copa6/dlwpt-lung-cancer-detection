@@ -15,7 +15,8 @@ class LunaModel(nn.Module):
         self.block3 = LunaBlock(conv_channels*2, conv_channels*4)
         self.block4 = LunaBlock(conv_channels*4, conv_channels*8)
 
-        self.fc = nn.Linear(64*3*3*2, 2)
+        self.fc = nn.Linear(16*4*3*3*2, 2)
+        # self.fc = nn.Linear(4*4*12*12*8, 2)
         self.softmax = nn.Softmax(dim=1)
         self._init_weights()
 
@@ -38,6 +39,7 @@ class LunaModel(nn.Module):
         conv_out = self.block4(conv_out)
 
         flat_out = conv_out.view(conv_out.size(0), -1)
+        # print(flat_out.size())
         lin_out = self.fc(flat_out)
         softmax_out = self.softmax(lin_out)
 

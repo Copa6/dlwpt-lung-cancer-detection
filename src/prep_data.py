@@ -1,5 +1,6 @@
 import os
 import glob
+import functools
 import pandas as pd
 import SimpleITK as sitk
 import numpy as np
@@ -18,10 +19,19 @@ def add_diameter_to_candidates(override=False):
     if not(os.path.exists(candidates_with_diameters_file)) or override:
         annotations_df = pd.read_csv(annotations_file)
         candidates_df = pd.read_csv(candidates_file)
+        mhd_list_files = glob.glob(f"{data_dir}/subset*/*.mhd")
+        present_on_disk_mhd = {os.path.split(p)[-1][:-4] for p in mhd_list_files}
 
         diameters = [0] * len(candidates_df)
+        is_present = [True] * len(candidates_df)
         for idx, row in candidates_df.iterrows():
+            if idx % 1000 == 0:
+                print(f"Processed {idx} rows")
             s_uid, x, y, z, label = row
+            if s_uid not in present_on_disk_mhd:
+                print(f"{s_uid} not found on disk")
+                is_present[idx] = False
+                continue
             diameter_table = annotations_df.loc[annotations_df["seriesuid"] == s_uid]
             for _, a_row in diameter_table.iterrows():
                 _a, a_x, a_y, a_z, dia = a_row
@@ -29,6 +39,7 @@ def add_diameter_to_candidates(override=False):
                     diameters[idx] = dia
                     break
             candidates_df["diameters"] = diameters
+            candidates_df["on_disk"] = is_present
             candidates_df.sort_values("diameters", inplace=True)
             candidates_df.to_csv(candidates_with_diameters_file, index=False)
 
@@ -77,23 +88,40 @@ class Ct:
         return ct_slice, center_irc
 
 
+@functools.lru_cache(1, typed=True)
+def load_ct_from_cache(series_uid):
+    ct = Ct(series_uid)
+    return ct
+
+
+@functools.lru_cache(2)
+def slice_ct_cached(series_uid, slice_dimensions, center_xyz):
+    ct = load_ct_from_cache(series_uid)
+    ct_slice, center_irc = ct.get_ct_slice(slice_dimensions, center_xyz)
+    return ct_slice, center_irc
+
+
 class LunaDataset(Dataset):
     def __init__(self, is_val_set=False, val_stride=10):
         df = pd.read_csv(candidates_with_diameters_file)
-        self.ct_slice_size = [32, 48, 48]
+        df_on_disk = df.loc[df["on_disk"] == True].reset_index(drop=True)
+        self.ct_slice_size = tuple([32, 48, 48])
         if is_val_set:
-            self.data = df.iloc[::val_stride, :].reset_index(drop=True)
+            self.data = df_on_disk.iloc[::val_stride, :].reset_index(drop=True)
         else:
-            self.data = df.drop(df.index[::val_stride]).reset_index(drop=True)
+            self.data = df_on_disk.drop(df_on_disk.index[::val_stride]).reset_index(drop=True)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        seriesuid, coord_x, coord_y, coord_z, nodule_class, _ = self.data.iloc[idx, :]
-        ct_slice, center_irc = Ct(seriesuid).get_ct_slice(
+        seriesuid, coord_x, coord_y, coord_z, nodule_class, _, _ = self.data.iloc[idx, :]
+        center_xyz = tuple([coord_x, coord_y, coord_z])
+        ct_slice, center_irc = slice_ct_cached(
+            seriesuid,
             self.ct_slice_size,
-            [coord_x, coord_y, coord_z])
+            center_xyz
+        )
 
         ct_tensor = torch.tensor(ct_slice, dtype=torch.float32)
         ct_tensor = ct_tensor.unsqueeze(0)
@@ -111,6 +139,7 @@ class LunaDataset(Dataset):
 
 
 if __name__ == '__main__':
+    add_diameter_to_candidates(override=True)
     train_dl = DataLoader(LunaDataset(), batch_size=16, num_workers=8, pin_memory=True)
     for idx, batch in enumerateWithEstimate(train_dl, "Training DL"):
         if idx > 2:
