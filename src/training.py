@@ -13,7 +13,6 @@ from prep_data import LunaDataset
 from models import LunaModel
 from util.util import enumerateWithEstimate
 
-
 log = logging.getLogger(__name__)
 # log.setLevel(logging.WARN)
 log.setLevel(logging.INFO)
@@ -59,6 +58,19 @@ class LunaTrainingApp:
             default=10,
             type=int
         )
+        parser.add_argument(
+            "--balance",
+            help="Balancing ratio (Default: 2 - indicating 2:1 negative to positive ratio)",
+            default=2,
+            type=int
+        )
+        parser.add_argument(
+            "--max-samples",
+            "-m",
+            help="Maximum number of samples (Default: 150k)",
+            default=150_000,
+            type=int
+        )
         self.args = parser.parse_args(sys_argv)
         self.start_time = dt.now().strftime("%Y-%m-%d_%H.%M.%S")
 
@@ -90,7 +102,9 @@ class LunaTrainingApp:
         return trn_writer, val_writer
 
     def init_train_dl(self):
-        train_dataset = LunaDataset(val_stride=self.args.val_stride)
+        train_dataset = LunaDataset(val_stride=self.args.val_stride,
+                                    class_balance=self.args.balance,
+                                    max_samples=self.args.max_samples)
         train_dl = DataLoader(
             train_dataset,
             batch_size=self.args.batch_size,
@@ -100,7 +114,10 @@ class LunaTrainingApp:
         return train_dl
 
     def init_val_dl(self):
-        val_dataset = LunaDataset(val_stride=self.args.val_stride, is_val_set=True)
+        val_dataset = LunaDataset(val_stride=self.args.val_stride,
+                                  is_val_set=True,
+                                  class_balance=self.args.balance,
+                                  max_samples=self.args.max_samples)
         val_dl = DataLoader(
             val_dataset,
             batch_size=self.args.batch_size,
@@ -116,12 +133,16 @@ class LunaTrainingApp:
             len(train_dl.dataset),
             device=self.device
         )
-        batch_iterator = enumerateWithEstimate(train_dl, f"Train Epoch - {epoch_idx}", train_dl.num_workers)
+        # batch_iterator = enumerateWithEstimate(train_dl, f"Train Epoch - {epoch_idx}", train_dl.num_workers)
+        batch_iterator = enumerate(train_dl)
         for batch_idx, batch in batch_iterator:
+            # log.info("Loaded 1 batch")
             self.optimizer.zero_grad()
             batch_loss = self.compute_batch_loss(batch_idx, train_dl.batch_size, batch, epoch_train_metrics)
             batch_loss.backward()
             self.optimizer.step()
+            if (batch_idx + 1) % 16 == 0:
+                log.info(f"Processed {batch_idx + 1} batch")
 
         self.total_training_samples_count += len(train_dl.dataset)
         return epoch_train_metrics.to('cpu')
@@ -183,9 +204,9 @@ class LunaTrainingApp:
         metrics_dict['loss/pos'] = metrics_tensor[METRICS_LOSS_IDX, list(pos_label_mask)].mean()
         metrics_dict['loss/neg'] = metrics_tensor[METRICS_LOSS_IDX, list(neg_label_mask)].mean()
 
-        metrics_dict['accuracy/all'] = 100 * correct_all/np.float32(total_all)
-        metrics_dict['accuracy/pos'] = 100 * correct_positive/np.float32(total_positive)
-        metrics_dict['accuracy/neg'] = 100 * correct_negative/np.float32(total_negative)
+        metrics_dict['accuracy/all'] = 100 * correct_all / np.float32(total_all)
+        metrics_dict['accuracy/pos'] = 100 * correct_positive / np.float32(total_positive)
+        metrics_dict['accuracy/neg'] = 100 * correct_negative / np.float32(total_negative)
 
         log.info(f"Loss {mode}: {metrics_dict['loss/all']}\n"
                  f"Accuracy {mode}: {metrics_dict['accuracy/all']} ({correct_all} of {total_all})\n\n")
@@ -214,7 +235,7 @@ class LunaTrainingApp:
                  f"and {len(val_dl)} validation batches")
 
         num_epochs = self.args.epochs
-        for epoch_idx in range(1, num_epochs+1):
+        for epoch_idx in range(1, num_epochs + 1):
             log.info(f"Epoch {epoch_idx} of {num_epochs}")
             train_metrics = self.run_train_loop(train_dl, epoch_idx)
             self.log_metrics(train_metrics, "train")
@@ -225,10 +246,3 @@ class LunaTrainingApp:
 
 if __name__ == '__main__':
     LunaTrainingApp().main()
-
-
-
-
-
-
-

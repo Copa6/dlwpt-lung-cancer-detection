@@ -7,13 +7,21 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 from util.util import XyzTuple, xyz2irc, enumerateWithEstimate
+from util.logconf import logging
+from util.disk import getCache
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+log.setLevel(logging.DEBUG)
 
 base_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 data_dir = os.path.join(base_dir, "data")
 annotations_file = os.path.join(data_dir, "annotations.csv")
 candidates_file = os.path.join(data_dir, "candidates.csv")
 candidates_with_diameters_file = os.path.join(data_dir, "candidates_with_dia.csv")
+cached_data_dir = os.path.join(data_dir, "cache")
 
+raw_cache = getCache(cached_data_dir)
 
 def add_diameter_to_candidates(override=False):
     if not(os.path.exists(candidates_with_diameters_file)) or override:
@@ -88,13 +96,13 @@ class Ct:
         return ct_slice, center_irc
 
 
-@functools.lru_cache(1, typed=True)
+@functools.lru_cache(typed=True)
 def load_ct_from_cache(series_uid):
     ct = Ct(series_uid)
     return ct
 
 
-@functools.lru_cache(2)
+@raw_cache.memoize(typed=True)
 def slice_ct_cached(series_uid, slice_dimensions, center_xyz):
     ct = load_ct_from_cache(series_uid)
     ct_slice, center_irc = ct.get_ct_slice(slice_dimensions, center_xyz)
@@ -102,26 +110,71 @@ def slice_ct_cached(series_uid, slice_dimensions, center_xyz):
 
 
 class LunaDataset(Dataset):
-    def __init__(self, is_val_set=False, val_stride=10):
-        df = pd.read_csv(candidates_with_diameters_file)
-        df_on_disk = df.loc[df["on_disk"] == True].reset_index(drop=True)
+    def __init__(self, is_val_set=False, val_stride=10, class_balance=None, max_samples=150_000, to_cache=False):
+        self.class_balance = class_balance
+        self.max_samples = max_samples
         self.ct_slice_size = tuple([32, 48, 48])
-        if is_val_set:
-            self.data = df_on_disk.iloc[::val_stride, :].reset_index(drop=True)
+
+        df = pd.read_csv(candidates_with_diameters_file)
+        df_on_disk = df.loc[df["on_disk"]].reset_index(drop=True)
+
+        if to_cache:
+            self.data = df_on_disk
+            self.data.sort_values("seriesuid", inplace=True)
+            self.max_samples = len(df_on_disk)
         else:
-            self.data = df_on_disk.drop(df_on_disk.index[::val_stride]).reset_index(drop=True)
+            if is_val_set:
+                data = df_on_disk.iloc[::val_stride, :].reset_index(drop=True)
+            else:
+                data = df_on_disk.drop(df_on_disk.index[::val_stride]).reset_index(drop=True)
+
+            self.pos_samples = data[data["class"] == 1].reset_index(drop=True)
+            self.num_pos_samples = len(self.pos_samples)
+
+            self.neg_samples = data[data["class"] == 0].reset_index(drop=True)
+            self.num_neg_samples = len(self.neg_samples)
+
+            if self.class_balance:
+                log.info(f"Prepare balanced data")
+                self.data = self.prepare_balanced_data()
+            else:
+                self.data = data
+        # print(self.data.head())
+
+            log.info(f"Load {'val' if is_val_set else 'training'} data with "
+                     f"{max_samples} maximum samples\n"
+                     f"Balancing ratio - {class_balance}, with \n"
+                     f"{self.num_pos_samples} positive samples\n"
+                     f"{self.num_neg_samples} negative samples")
+
+    def prepare_balanced_data(self):
+        num_positives = self.max_samples//(self.class_balance + 1)
+        num_negatives = self.max_samples - num_positives
+
+        sampled_positives = self.pos_samples.sample(n=num_positives, replace=True)
+        sampled_negatives = self.neg_samples.sample(n=num_negatives, replace=True)
+        balanced_data = sampled_positives.append(sampled_negatives).reset_index(drop=True)
+        balanced_data = balanced_data.sample(frac=1)
+        balanced_data.sort_values("diameters", inplace=True)
+        data = balanced_data.reset_index(drop=True)
+        return data
 
     def __len__(self):
-        return len(self.data)
+        num_samples = len(self.data)
+        data_len = min(self.max_samples, num_samples)
+        return data_len
 
     def __getitem__(self, idx):
+        # log.info(f"Load candidate {idx}")
         seriesuid, coord_x, coord_y, coord_z, nodule_class, _, _ = self.data.iloc[idx, :]
+        # log.debug(f"Series id - {seriesuid}")
         center_xyz = tuple([coord_x, coord_y, coord_z])
         ct_slice, center_irc = slice_ct_cached(
             seriesuid,
             self.ct_slice_size,
             center_xyz
         )
+        # log.debug("Got ct Slice")
 
         ct_tensor = torch.tensor(ct_slice, dtype=torch.float32)
         ct_tensor = ct_tensor.unsqueeze(0)
@@ -139,8 +192,10 @@ class LunaDataset(Dataset):
 
 
 if __name__ == '__main__':
-    add_diameter_to_candidates(override=True)
-    train_dl = DataLoader(LunaDataset(), batch_size=16, num_workers=8, pin_memory=True)
+    train_dl = DataLoader(LunaDataset(class_balance=1, to_cache=0),
+                          batch_size=256,
+                          num_workers=6)
+
     for idx, batch in enumerateWithEstimate(train_dl, "Training DL"):
         if idx > 2:
             break
