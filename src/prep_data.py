@@ -21,7 +21,8 @@ candidates_file = os.path.join(data_dir, "candidates.csv")
 candidates_with_diameters_file = os.path.join(data_dir, "candidates_with_dia.csv")
 cached_data_dir = os.path.join(data_dir, "cache")
 
-raw_cache = getCache(cached_data_dir)
+# raw_cache = getCache(cached_data_dir)
+
 
 def add_diameter_to_candidates(override=False):
     if not(os.path.exists(candidates_with_diameters_file)) or override:
@@ -96,13 +97,12 @@ class Ct:
         return ct_slice, center_irc
 
 
-@functools.lru_cache(typed=True)
+@functools.lru_cache(1, typed=True)
 def load_ct_from_cache(series_uid):
     ct = Ct(series_uid)
     return ct
 
-
-@raw_cache.memoize(typed=True)
+@functools.lru_cache(2)
 def slice_ct_cached(series_uid, slice_dimensions, center_xyz):
     ct = load_ct_from_cache(series_uid)
     ct_slice, center_irc = ct.get_ct_slice(slice_dimensions, center_xyz)
@@ -167,7 +167,7 @@ class LunaDataset(Dataset):
     def __getitem__(self, idx):
         # log.info(f"Load candidate {idx}")
         seriesuid, coord_x, coord_y, coord_z, nodule_class, _, _ = self.data.iloc[idx, :]
-        # log.debug(f"Series id - {seriesuid}")
+        log.debug(f"Series id - {seriesuid.split('.')[-1]}")
         center_xyz = tuple([coord_x, coord_y, coord_z])
         ct_slice, center_irc = slice_ct_cached(
             seriesuid,

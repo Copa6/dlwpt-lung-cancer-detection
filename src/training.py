@@ -133,8 +133,8 @@ class LunaTrainingApp:
             len(train_dl.dataset),
             device=self.device
         )
-        # batch_iterator = enumerateWithEstimate(train_dl, f"Train Epoch - {epoch_idx}", train_dl.num_workers)
-        batch_iterator = enumerate(train_dl)
+        batch_iterator = enumerateWithEstimate(train_dl, f"Train Epoch - {epoch_idx}", train_dl.num_workers)
+        # batch_iterator = enumerate(train_dl)
         for batch_idx, batch in batch_iterator:
             # log.info("Loaded 1 batch")
             self.optimizer.zero_grad()
