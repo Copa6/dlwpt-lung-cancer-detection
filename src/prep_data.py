@@ -2,6 +2,8 @@ import os
 import glob
 import functools
 import pandas as pd
+import joblib
+import math
 import SimpleITK as sitk
 import numpy as np
 import torch
@@ -56,96 +58,38 @@ def add_diameter_to_candidates(override=False):
             print("Found existing file and no override flag.")
 
 
-class Ct:
-    def __init__(self, series_uid):
-        self.series_uid = series_uid
-        mhd_path = glob.glob(f"{data_dir}/subset*/{series_uid}.mhd")[0]
-        ct_mhd = sitk.ReadImage(mhd_path)
-        ct_array = np.asarray(sitk.GetArrayFromImage(ct_mhd), np.float32)
-
-        self.ct = np.clip(ct_array, -1000, 1000)
-
-        self.origin = XyzTuple(*ct_mhd.GetOrigin())
-        self.voxel_size = XyzTuple(*ct_mhd.GetSpacing())
-        self.direction = np.array(ct_mhd.GetDirection()).reshape(3, 3)
-
-    def get_ct_slice(self, slice_dimensions, center_xyz):
-        center_irc = xyz2irc(
-            center_xyz,
-            self.origin,
-            self.voxel_size,
-            self.direction
-        )
-
-        ct_shape = self.ct.shape
-        slice_list = []
-        for i, dim in enumerate(slice_dimensions):
-            start_idx = center_irc[i] + dim//2
-            end_idx = start_idx + dim
-
-            if start_idx < 0:
-                start_idx = 0
-                end_idx = dim
-
-            if end_idx > ct_shape[i]:
-                start_idx = ct_shape[i] - dim
-                end_idx = ct_shape[i]
-
-            slice_list.append(slice(start_idx, end_idx))
-
-        ct_slice = self.ct[tuple(slice_list)]
-        return ct_slice, center_irc
-
-
-@functools.lru_cache(1, typed=True)
-def load_ct_from_cache(series_uid):
-    ct = Ct(series_uid)
-    return ct
-
-@functools.lru_cache(2)
-def slice_ct_cached(series_uid, slice_dimensions, center_xyz):
-    ct = load_ct_from_cache(series_uid)
-    ct_slice, center_irc = ct.get_ct_slice(slice_dimensions, center_xyz)
-    return ct_slice, center_irc
-
-
 class LunaDataset(Dataset):
-    def __init__(self, is_val_set=False, val_stride=10, class_balance=None, max_samples=150_000, to_cache=False):
+    def __init__(self, is_val_set=False, val_stride=10, class_balance=None, max_samples=None):
         self.class_balance = class_balance
-        self.max_samples = max_samples
         self.ct_slice_size = tuple([32, 48, 48])
 
         df = pd.read_csv(candidates_with_diameters_file)
         df_on_disk = df.loc[df["on_disk"]].reset_index(drop=True)
-
-        if to_cache:
-            self.data = df_on_disk
-            self.data.sort_values("seriesuid", inplace=True)
-            self.max_samples = len(df_on_disk)
+        
+        if is_val_set:
+            data = df_on_disk.iloc[::val_stride, :].reset_index(drop=True)
         else:
-            if is_val_set:
-                data = df_on_disk.iloc[::val_stride, :].reset_index(drop=True)
-            else:
-                data = df_on_disk.drop(df_on_disk.index[::val_stride]).reset_index(drop=True)
+            data = df_on_disk.drop(df_on_disk.index[::val_stride]).reset_index(drop=True)
 
-            self.pos_samples = data[data["class"] == 1].reset_index(drop=True)
-            self.num_pos_samples = len(self.pos_samples)
+        self.max_samples = max_samples if max_samples else data.shape[0]
+        self.pos_samples = data[data["class"] == 1].reset_index(drop=True)
+        self.num_pos_samples = len(self.pos_samples)
 
-            self.neg_samples = data[data["class"] == 0].reset_index(drop=True)
-            self.num_neg_samples = len(self.neg_samples)
+        self.neg_samples = data[data["class"] == 0].reset_index(drop=True)
+        self.num_neg_samples = len(self.neg_samples)
 
-            if self.class_balance:
-                log.info(f"Prepare balanced data")
-                self.data = self.prepare_balanced_data()
-            else:
-                self.data = data
+        if self.class_balance:
+            log.info(f"Prepare balanced data")
+            self.data = self.prepare_balanced_data()
+        else:
+            self.data = data
         # print(self.data.head())
 
-            log.info(f"Load {'val' if is_val_set else 'training'} data with "
-                     f"{max_samples} maximum samples\n"
-                     f"Balancing ratio - {class_balance}, with \n"
-                     f"{self.num_pos_samples} positive samples\n"
-                     f"{self.num_neg_samples} negative samples")
+        log.info(f"Load {'val' if is_val_set else 'training'} data with "
+                    f"{max_samples} maximum samples\n"
+                    f"Balancing ratio - {class_balance}, with \n"
+                    f"{self.num_pos_samples} positive samples\n"
+                    f"{self.num_neg_samples} negative samples")
 
     def prepare_balanced_data(self):
         num_positives = self.max_samples//(self.class_balance + 1)
@@ -165,16 +109,10 @@ class LunaDataset(Dataset):
         return data_len
 
     def __getitem__(self, idx):
-        # log.info(f"Load candidate {idx}")
+        # log.debug(f"Load {idx}")
         seriesuid, coord_x, coord_y, coord_z, nodule_class, _, _ = self.data.iloc[idx, :]
-        log.debug(f"Series id - {seriesuid.split('.')[-1]}")
-        center_xyz = tuple([coord_x, coord_y, coord_z])
-        ct_slice, center_irc = slice_ct_cached(
-            seriesuid,
-            self.ct_slice_size,
-            center_xyz
-        )
-        # log.debug("Got ct Slice")
+        cache_file = os.path.join(cached_data_dir, f"{seriesuid}_{coord_x}_{coord_y}_{coord_z}_{nodule_class}.pkl")
+        ct_slice, center_irc = joblib.load(cache_file)
 
         ct_tensor = torch.tensor(ct_slice, dtype=torch.float32)
         ct_tensor = ct_tensor.unsqueeze(0)

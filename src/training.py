@@ -115,9 +115,7 @@ class LunaTrainingApp:
 
     def init_val_dl(self):
         val_dataset = LunaDataset(val_stride=self.args.val_stride,
-                                  is_val_set=True,
-                                  class_balance=self.args.balance,
-                                  max_samples=self.args.max_samples)
+                                  is_val_set=True)
         val_dl = DataLoader(
             val_dataset,
             batch_size=self.args.batch_size,
