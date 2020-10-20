@@ -4,10 +4,12 @@ import functools
 import pandas as pd
 import joblib
 import math
+import random
 import SimpleITK as sitk
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
 from util.util import XyzTuple, xyz2irc, enumerateWithEstimate
 from util.logconf import logging
 from util.disk import getCache
@@ -58,9 +60,63 @@ def add_diameter_to_candidates(override=False):
             print("Found existing file and no override flag.")
 
 
+def get_augmented_candidate(augmentation_dict, candidate_tensor):
+    transform_t = torch.eye(4)
+    candidate_tensor = candidate_tensor.unsqueeze(0).unsqueeze(0).to(torch.float32)
+
+    for i in range(3):
+        if "flip" in augmentation_dict:
+            if random.random() > 0.5:
+                transform_t[i, i] *= -1
+        
+        if "offset" in augmentation_dict:
+            offset_amt = augmentation_dict["offset"]
+            randomness = random.random() * 2 - 1
+            transform_t[i, 3] = offset_amt * randomness
+        
+        if "scale" in augmentation_dict:
+            scale_amt = augmentation_dict["scale"]
+            randomness = random.random() * 2 - 1
+            transform_t[i, i] *= 1+ scale_amt*randomness
+
+    if "rotate" in augmentation_dict:
+        rotation_angle = random.random() * math.pi * 2
+        sine = math.sin(rotation_angle)
+        cos = math.cos(rotation_angle)
+
+        rotation_t = torch.tensor([
+            [cos, -sine, 0, 0],
+            [sine, cos, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ])
+
+        transform_t @= rotation_t
+    
+    affine_t = F.affine_grid(
+        transform_t[:3].unsqueeze(0).to(torch.float32),
+        candidate_tensor.size(),
+        align_corners=False
+    )
+
+    augmented_candidate = F.grid_sample(
+        candidate_tensor,
+        affine_t,
+        padding_mode='border',
+        align_corners=False
+    ).to('cpu')
+
+    if "noise" in augmentation_dict:
+        noise_t = torch.randn_like(augmented_candidate) * augmentation_dict["noise"]
+        augmented_candidate += noise_t
+
+    return augmented_candidate[0]
+    
+
 class LunaDataset(Dataset):
-    def __init__(self, is_val_set=False, val_stride=10, class_balance=None, max_samples=None):
+    def __init__(self, is_val_set=False, val_stride=10, class_balance=None, max_samples=None, augmentation_dict=None):
         self.class_balance = class_balance
+        self.augmentation_dict = augmentation_dict
         self.ct_slice_size = tuple([32, 48, 48])
 
         df = pd.read_csv(candidates_with_diameters_file)
@@ -113,9 +169,11 @@ class LunaDataset(Dataset):
         seriesuid, coord_x, coord_y, coord_z, nodule_class, _, _ = self.data.iloc[idx, :]
         cache_file = os.path.join(cached_data_dir, f"{seriesuid}_{coord_x}_{coord_y}_{coord_z}_{nodule_class}.pkl")
         ct_slice, center_irc = joblib.load(cache_file)
-
         ct_tensor = torch.tensor(ct_slice, dtype=torch.float32)
-        ct_tensor = ct_tensor.unsqueeze(0)
+        if self.augmentation_dict:
+            ct_tensor = get_augmented_candidate(self.augmentation_dict, ct_tensor)
+        else:
+            ct_tensor = ct_tensor.unsqueeze(0).to(torch.float32)
 
         label_tensor = torch.tensor(
             [not nodule_class, nodule_class],

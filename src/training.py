@@ -71,6 +71,42 @@ class LunaTrainingApp:
             default=150_000,
             type=int
         )
+        parser.add_argument(
+            "--augmented",
+            help="Apply augmentations to the data. (Default: True)",
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            "--aug-flip",
+            help="Apply flip augmentation. (Default: True)",
+            default=True,
+            type=bool
+        )
+        parser.add_argument(
+            "--aug-offset",
+            help="Apply offset augmentation. (Default: 0.1)",
+            default=0.5,
+            type=float
+        )
+        parser.add_argument(
+            "--aug-scale",
+            help="Scale the data. (Default: 0.2)",
+            default=0.2,
+            type=float
+        )
+        parser.add_argument(
+            "--aug-rotate",
+            help="Rotate the data along X, and Y axis. (Default: True)",
+            default=True,
+            type=bool
+        )
+        parser.add_argument(
+            "--aug-noise",
+            help="Add random noise to the data. (Default: 25)",
+            default=0.2,
+            type=float
+        )
         self.args = parser.parse_args(sys_argv)
         self.start_time = dt.now().strftime("%Y-%m-%d_%H.%M.%S")
 
@@ -82,6 +118,7 @@ class LunaTrainingApp:
         self.model = self.init_model()
         self.optimizer = self.init_optimizer()
         self.tb_writer_train, self.tb_writer_val = self.init_tb_writer()
+        self.augmentation_dict = self.init_augmentation_dict()
 
     def init_model(self):
         model = LunaModel()
@@ -100,11 +137,27 @@ class LunaTrainingApp:
         val_writer = SummaryWriter(f"{iteration_logs_dir}-val")
 
         return trn_writer, val_writer
+    
+    def init_augmentation_dict(self):
+        if self.args.augmented:
+            augmentation_dict = {
+                "flip": self.args.aug_flip,
+                "offset": self.args.aug_offset,
+                "scale": self.args.aug_scale,
+                "rotate": self.args.aug_rotate,
+                "noise": self.args.aug_noise,
+            }
+            log.info(f"Initialize augmentations - \n{augmentation_dict}")
+            return augmentation_dict
+        else: 
+            return None
 
     def init_train_dl(self):
         train_dataset = LunaDataset(val_stride=self.args.val_stride,
                                     class_balance=self.args.balance,
-                                    max_samples=self.args.max_samples)
+                                    max_samples=self.args.max_samples, 
+                                    augmentation_dict=self.augmentation_dict
+                                    )
         train_dl = DataLoader(
             train_dataset,
             batch_size=self.args.batch_size,
